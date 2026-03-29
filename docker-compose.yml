@@ -1,0 +1,288 @@
+# =============================================================================
+# Leihs Docker Compose Stack
+# =============================================================================
+# Equipment booking and inventory management system
+# https://github.com/leihs/leihs
+#
+# Usage:
+#   docker compose up -d --build
+#
+# First build takes 15-30 minutes (Clojure uberjar + Rails asset compilation).
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL Database
+  # ---------------------------------------------------------------------------
+  leihs-db:
+    image: postgres:16-alpine
+    container_name: leihs-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-leihs}
+      POSTGRES_USER: ${POSTGRES_USER:-leihs}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5415}:5432"
+    volumes:
+      - leihs-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-leihs} -d ${POSTGRES_DB:-leihs}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - leihs-internal
+
+  # ---------------------------------------------------------------------------
+  # Database Migration Runner (runs once on startup)
+  # ---------------------------------------------------------------------------
+  leihs-db-migrate:
+    build:
+      context: .
+      dockerfile: docker/db-migrate/Dockerfile
+      args:
+        LEIHS_VERSION: ${LEIHS_VERSION:-7.13.3}
+    container_name: leihs-db-migrate
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-leihs}:${POSTGRES_PASSWORD}@leihs-db:5432/${POSTGRES_DB:-leihs}"
+      DB_HOST: leihs-db
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB:-leihs}
+      DB_USER: ${POSTGRES_USER:-leihs}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+    depends_on:
+      leihs-db:
+        condition: service_healthy
+    networks:
+      - leihs-internal
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # Leihs Legacy (Ruby on Rails - main application)
+  # ---------------------------------------------------------------------------
+  leihs-legacy:
+    build:
+      context: .
+      dockerfile: docker/legacy/Dockerfile
+      args:
+        LEIHS_VERSION: ${LEIHS_VERSION:-7.13.3}
+    container_name: leihs-legacy
+    restart: unless-stopped
+    environment:
+      RAILS_ENV: production
+      LEIHS_SECRET: ${LEIHS_MASTER_SECRET:?Set LEIHS_MASTER_SECRET in .env}
+      SECRET_KEY_BASE: ${LEIHS_MASTER_SECRET}
+      LEIHS_EXTERNAL_BASE_URL: ${LEIHS_EXTERNAL_BASE_URL:-https://leihs.example.com}
+      DB_HOST: leihs-db
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB:-leihs}
+      DB_USER: ${POSTGRES_USER:-leihs}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      LEIHS_LEGACY_PORT: "3210"
+    volumes:
+      - leihs-legacy-uploads:/leihs/legacy/public/uploads
+    depends_on:
+      leihs-db:
+        condition: service_healthy
+      leihs-db-migrate:
+        condition: service_completed_successfully
+    networks:
+      - leihs-internal
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3210/status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+
+  # ---------------------------------------------------------------------------
+  # Leihs Admin (Clojure JVM)
+  # ---------------------------------------------------------------------------
+  leihs-admin:
+    build:
+      context: .
+      dockerfile: docker/clj-service/Dockerfile
+      args:
+        LEIHS_VERSION: ${LEIHS_VERSION:-7.13.3}
+        SERVICE_NAME: admin
+        SERVICE_PORT: "3220"
+    container_name: leihs-admin
+    restart: unless-stopped
+    environment:
+      JAVA_OPTS: ${JAVA_OPTS:--Xmx1G}
+      DB_HOST: leihs-db
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB:-leihs}
+      DB_USER: ${POSTGRES_USER:-leihs}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      HTTP_HOST: "0.0.0.0"
+      HTTP_PORT: "3220"
+    depends_on:
+      leihs-db:
+        condition: service_healthy
+      leihs-db-migrate:
+        condition: service_completed_successfully
+    networks:
+      - leihs-internal
+
+  # ---------------------------------------------------------------------------
+  # Leihs Borrow (Clojure JVM)
+  # ---------------------------------------------------------------------------
+  leihs-borrow:
+    build:
+      context: .
+      dockerfile: docker/clj-service/Dockerfile
+      args:
+        LEIHS_VERSION: ${LEIHS_VERSION:-7.13.3}
+        SERVICE_NAME: borrow
+        SERVICE_PORT: "3250"
+    container_name: leihs-borrow
+    restart: unless-stopped
+    environment:
+      JAVA_OPTS: ${JAVA_OPTS:--Xmx1G}
+      DB_HOST: leihs-db
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB:-leihs}
+      DB_USER: ${POSTGRES_USER:-leihs}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      HTTP_HOST: "0.0.0.0"
+      HTTP_PORT: "3250"
+    depends_on:
+      leihs-db:
+        condition: service_healthy
+      leihs-db-migrate:
+        condition: service_completed_successfully
+    networks:
+      - leihs-internal
+
+  # ---------------------------------------------------------------------------
+  # Leihs My (Clojure JVM)
+  # ---------------------------------------------------------------------------
+  leihs-my:
+    build:
+      context: .
+      dockerfile: docker/clj-service/Dockerfile
+      args:
+        LEIHS_VERSION: ${LEIHS_VERSION:-7.13.3}
+        SERVICE_NAME: my
+        SERVICE_PORT: "3240"
+    container_name: leihs-my
+    restart: unless-stopped
+    environment:
+      JAVA_OPTS: ${JAVA_OPTS:--Xmx1G}
+      DB_HOST: leihs-db
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB:-leihs}
+      DB_USER: ${POSTGRES_USER:-leihs}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      HTTP_HOST: "0.0.0.0"
+      HTTP_PORT: "3240"
+    depends_on:
+      leihs-db:
+        condition: service_healthy
+      leihs-db-migrate:
+        condition: service_completed_successfully
+    networks:
+      - leihs-internal
+
+  # ---------------------------------------------------------------------------
+  # Leihs Procure (Clojure JVM)
+  # ---------------------------------------------------------------------------
+  leihs-procure:
+    build:
+      context: .
+      dockerfile: docker/clj-service/Dockerfile
+      args:
+        LEIHS_VERSION: ${LEIHS_VERSION:-7.13.3}
+        SERVICE_NAME: procure
+        SERVICE_PORT: "3230"
+    container_name: leihs-procure
+    restart: unless-stopped
+    environment:
+      JAVA_OPTS: ${JAVA_OPTS:--Xmx1G}
+      DB_HOST: leihs-db
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB:-leihs}
+      DB_USER: ${POSTGRES_USER:-leihs}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      HTTP_HOST: "0.0.0.0"
+      HTTP_PORT: "3230"
+    depends_on:
+      leihs-db:
+        condition: service_healthy
+      leihs-db-migrate:
+        condition: service_completed_successfully
+    networks:
+      - leihs-internal
+
+  # ---------------------------------------------------------------------------
+  # Leihs Mail (Clojure JVM - background email processor)
+  # ---------------------------------------------------------------------------
+  leihs-mail:
+    build:
+      context: .
+      dockerfile: docker/clj-service/Dockerfile
+      args:
+        LEIHS_VERSION: ${LEIHS_VERSION:-7.13.3}
+        SERVICE_NAME: mail
+        SERVICE_PORT: "3200"
+    container_name: leihs-mail
+    restart: unless-stopped
+    environment:
+      JAVA_OPTS: "-Xmx500m"
+      DB_HOST: leihs-db
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB:-leihs}
+      DB_USER: ${POSTGRES_USER:-leihs}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+    depends_on:
+      leihs-db:
+        condition: service_healthy
+      leihs-db-migrate:
+        condition: service_completed_successfully
+    networks:
+      - leihs-internal
+
+  # ---------------------------------------------------------------------------
+  # Reverse Proxy (internal path-based routing)
+  # ---------------------------------------------------------------------------
+  leihs-reverse-proxy:
+    image: nginx:1.27-alpine
+    container_name: leihs-reverse-proxy
+    restart: unless-stopped
+    ports:
+      - "${LEIHS_HTTP_PORT:-3100}:80"
+    volumes:
+      - ./docker/reverse-proxy/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - leihs-legacy
+      - leihs-admin
+      - leihs-borrow
+      - leihs-my
+      - leihs-procure
+    networks:
+      - leihs-internal
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  leihs-db-data:
+    driver: local
+  leihs-legacy-uploads:
+    driver: local
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  leihs-internal:
+    driver: bridge
