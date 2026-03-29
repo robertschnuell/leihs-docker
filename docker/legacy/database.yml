@@ -1,0 +1,22 @@
+default: &default
+  adapter: postgresql
+  encoding: unicode
+  host: <%= ENV.fetch('DB_HOST', 'leihs-db') %>
+  port: <%= ENV.fetch('DB_PORT', '5432') %>
+  database: <%= ENV.fetch('DB_NAME', 'leihs') %>
+  username: <%= ENV.fetch('DB_USER', 'leihs') %>
+  password: <%= ENV.fetch('DB_PASSWORD', 'leihs') %>
+  pool: <%= ENV.fetch('RAILS_MAX_THREADS', '5') %>
+
+production:
+  <<: *default
+
+development:
+  <<: *default
+
+test:
+  <<: *default
+
+# leihs deploy config uses a "database:" top-level key
+database:
+  <<: *default
