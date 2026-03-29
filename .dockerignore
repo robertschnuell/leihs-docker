@@ -1,0 +1,11 @@
+# Don't send these to Docker build context
+source/
+.git/
+data/
+keys/
+*.pem
+.env
+.env.*
+!.env.example
+docs/
+README.md
