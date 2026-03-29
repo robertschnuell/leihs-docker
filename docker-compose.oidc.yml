@@ -1,0 +1,49 @@
+# =============================================================================
+# OIDC Bridge Overlay for Authentik Integration
+# =============================================================================
+# Adds the OIDC bridge service for external authentication via Authentik.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.oidc.yml up -d --build
+#
+# Or set COMPOSE_FILE in .env:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.oidc.yml
+# =============================================================================
+
+services:
+
+  leihs-oidc-bridge:
+    build:
+      context: ./docker/oidc-bridge
+      dockerfile: Dockerfile
+    container_name: leihs-oidc-bridge
+    restart: unless-stopped
+    environment:
+      FLASK_ENV: production
+      FLASK_SECRET_KEY: ${LEIHS_MASTER_SECRET}
+      OIDC_BRIDGE_PORT: "3300"
+      AUTHENTIK_ISSUER_URL: ${AUTHENTIK_ISSUER_URL:?Set AUTHENTIK_ISSUER_URL in .env}
+      AUTHENTIK_CLIENT_ID: ${AUTHENTIK_CLIENT_ID:?Set AUTHENTIK_CLIENT_ID in .env}
+      AUTHENTIK_CLIENT_SECRET: ${AUTHENTIK_CLIENT_SECRET:?Set AUTHENTIK_CLIENT_SECRET in .env}
+      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:-https://leihs.example.com/authenticators/oidc/callback}
+      LEIHS_EXTERNAL_BASE_URL: ${LEIHS_EXTERNAL_BASE_URL:-https://leihs.example.com}
+      BRIDGE_PRIVATE_KEY_PATH: /keys/oidc-bridge-private.pem
+      BRIDGE_PUBLIC_KEY_PATH: /keys/oidc-bridge-public.pem
+      LEIHS_PUBLIC_KEY_PATH: /keys/leihs-public.pem
+    volumes:
+      - ./keys:/keys:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3300/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - leihs-internal
+
+  # Add OIDC bridge as dependency for the reverse proxy and swap nginx config
+  leihs-reverse-proxy:
+    volumes:
+      - ./docker/reverse-proxy/nginx-oidc.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - leihs-oidc-bridge
