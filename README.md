@@ -1,26 +1,31 @@
 # Leihs Docker Compose Deployment
 
-A Docker Compose setup for [leihs](https://github.com/leihs/leihs) — the equipment booking and inventory management system developed by Zurich University of the Arts.
+A Docker Compose setup for [leihs](https://github.com/leihs/leihs) — the equipment booking and inventory management system — with OIDC authentication via [Authentik](https://goauthentik.io/).
 
 > **Note:** This is an unofficial, community-maintained Docker deployment. Leihs is officially deployed via Ansible to bare-metal Debian/Ubuntu servers. This project packages all services into Docker containers for easier infrastructure integration.
 
 ## Architecture
 
 ```
-Reverse Proxy (SSL termination)
+Internet
+    │
+NPM (Nginx Proxy Manager)    ← SSL termination
     │
     ▼
-leihs-reverse-proxy (nginx, port 3100)
+leihs-reverse-proxy (nginx)  ← Routes by URL path
     │
     ├── /admin/*          → leihs-admin       (Clojure JVM, port 3200)
     ├── /borrow/*         → leihs-borrow      (Clojure JVM, port 3250)
     ├── /my/*             → leihs-my           (Clojure JVM, port 3240)
     ├── /procure/*        → leihs-procure      (Clojure JVM, port 3230)
     ├── /mail/*           → leihs-mail         (Clojure JVM, port 3220)
-    ├── /authenticators/* → leihs-oidc-bridge  (Python, port 3300) [optional]
+    ├── /inventory/*      → leihs-inventory    (Clojure JVM, port 3260)
+    ├── /authenticators/* → leihs-oidc-bridge  (Python, port 3300)
     └── /*                → leihs-legacy       (Ruby/Rails, port 3210)
     │
     └── PostgreSQL 16 (port 5415)
+
+    Authentik (auth.bitz.rfws.dev) ← OIDC Provider
 ```
 
 ## Services
@@ -29,12 +34,13 @@ leihs-reverse-proxy (nginx, port 3100)
 |---------|-----------|-------------|
 | `leihs-legacy` | Ruby on Rails 8.x | Main application (lending, inventory management) |
 | `leihs-admin` | Clojure (JVM) | Administration interface |
-| `leihs-borrow` | Clojure (JVM) | Borrowing and reservation interface |
-| `leihs-my` | Clojure (JVM) | User profile, sign-in, and settings |
+| `leihs-borrow` | Clojure (JVM) | Borrowing/reservation interface |
+| `leihs-my` | Clojure (JVM) | User profile and settings |
 | `leihs-procure` | Clojure (JVM) | Procurement module |
 | `leihs-mail` | Clojure (JVM) | Email processing service |
-| `leihs-oidc-bridge` | Python (Flask) | Bridges OIDC providers with leihs JWT auth (optional) |
-| `leihs-reverse-proxy` | Nginx | Internal path-based routing with security headers |
+| `leihs-inventory` | Clojure (JVM) | Inventory publishing (optional) |
+| `leihs-oidc-bridge` | Python (Flask) | Bridges Authentik OIDC ↔ leihs JWT auth |
+| `leihs-reverse-proxy` | Nginx | Internal path-based routing |
 | `leihs-db` | PostgreSQL 16 | Shared database |
 | `leihs-db-migrate` | Ruby + Clojure | Database migration runner (init container) |
 
@@ -42,16 +48,17 @@ leihs-reverse-proxy (nginx, port 3100)
 
 - Docker Engine 24+ and Docker Compose v2
 - At least 8 GB RAM available for containers
-- A reverse proxy with SSL termination (Nginx Proxy Manager, Traefik, Caddy, etc.)
-- OpenSSL (for secret generation)
+- Existing Nginx Proxy Manager instance
+- Existing Authentik instance with OIDC provider configured
 
 ## Quick Start
 
 ### 1. Clone and prepare
 
 ```bash
-git clone https://github.com/robertschnuell/leihs-docker.git
+git clone <this-repo> leihs-docker
 cd leihs-docker
+cp .env.example .env
 ```
 
 ### 2. Generate secrets
@@ -61,17 +68,19 @@ cd leihs-docker
 ```
 
 This generates:
-- `.env` file with random database password and master secret
-- ES256 key pairs in `keys/` for external authentication
-- Master secret file in `data/secret/`
+- Database password
+- Master secret (shared between all leihs services)
+- ES256 key pairs for OIDC bridge ↔ leihs communication
 
 ### 3. Configure
 
-Edit `.env` with your deployment values:
+Edit `.env` with your values:
 
 ```env
-LEIHS_EXTERNAL_HOSTNAME=leihs.example.com
-LEIHS_EXTERNAL_BASE_URL=https://leihs.example.com
+LEIHS_EXTERNAL_HOSTNAME=leihs.bitz.rfws.dev
+AUTHENTIK_ISSUER_URL=https://auth.bitz.rfws.dev/application/o/leihs/
+AUTHENTIK_CLIENT_ID=<from-authentik>
+AUTHENTIK_CLIENT_SECRET=<from-authentik>
 ```
 
 ### 4. Build and start
@@ -82,127 +91,121 @@ docker compose up -d --build
 
 The first build takes 15-30 minutes (compiling Clojure uberjars and Rails assets).
 
-### 5. Configure your reverse proxy
+### 5. Configure NPM
 
-Point your reverse proxy to the Docker host on port `3100` (HTTP). The internal nginx handles path routing — your external proxy only needs to terminate SSL and forward traffic.
+Add a proxy host in Nginx Proxy Manager:
+- **Domain:** `leihs.bitz.rfws.dev`
+- **Forward Hostname/IP:** `10.9.0.30` (Docker host)
+- **Forward Port:** `3100`
+- **SSL:** Request new Let's Encrypt certificate
 
-### 6. Create initial admin user
+### 6. Configure Authentik
 
-After all services are running:
+See [docs/authentik-setup.md](docs/authentik-setup.md) for detailed Authentik OIDC provider configuration.
 
-```bash
-docker compose exec leihs-legacy bin/rails runner "
-  user = User.find_or_create_by!(login: 'admin') do |u|
-    u.firstname = 'System'
-    u.lastname = 'Admin'
-    u.email = 'admin@example.com'
-    u.is_admin = true
-  end
-  AuthenticationSystemUser.find_or_create_by!(
-    user: user,
-    authentication_system: AuthenticationSystem.find_by(id: 'password')
-  )
-  user.update!(password: 'changeme')
-"
-```
+### 7. Initial admin setup
 
-Log in at `https://leihs.example.com/sign-in` with `admin` / `changeme` and change the password immediately.
-
-## OIDC Authentication (Optional)
-
-Leihs uses a custom JWT-based external authentication system, not standard OIDC. The included OIDC bridge translates between the two protocols, allowing integration with providers like Authentik, Keycloak, or any OpenID Connect provider.
-
-To enable the OIDC bridge, use the compose overlay:
+After first start, the database migration and seed data run automatically. Then create the initial admin:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.oidc.yml up -d --build
+curl -k -X POST "https://<your-domain>/admin/initial-admin" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "email=admin@example.com&password=changeme"
 ```
 
-Or set `COMPOSE_FILE` in `.env`:
+> **Note:** The `/admin/initial-admin` endpoint only works when no admin user exists yet.
 
-```env
-COMPOSE_FILE=docker-compose.yml:docker-compose.oidc.yml
-```
+Then log in at `https://<your-domain>/sign-in` with your email and password.
 
-You also need to configure the OIDC-specific variables in `.env`:
+### 8. Configure OIDC in leihs (optional)
 
-```env
-AUTHENTIK_ISSUER_URL=https://auth.example.com/application/o/leihs/
-AUTHENTIK_CLIENT_ID=<your-client-id>
-AUTHENTIK_CLIENT_SECRET=<your-client-secret>
-OIDC_REDIRECT_URI=https://leihs.example.com/authenticators/oidc/callback
-```
-
-For a step-by-step Authentik setup guide, see [docs/authentik-setup.md](docs/authentik-setup.md).
-
-### Authentication Flow
-
-```
-1. User clicks external sign-in button on leihs login page
-2. leihs creates a signed JWT token, redirects to the OIDC bridge
-3. Bridge verifies the leihs JWT, redirects to the OIDC provider
-4. User authenticates at the OIDC provider
-5. Provider redirects back to the bridge with an authorization code
-6. Bridge exchanges the code for tokens, extracts the user email
-7. Bridge creates a signed JWT with the user identity
-8. Bridge redirects back to leihs with the signed JWT
-9. leihs verifies the JWT signature and creates a user session
-```
-
-## Testing
-
-Run the functional test suite against a running deployment:
-
-```bash
-export LEIHS_TEST_USER=admin@example.com
-export LEIHS_TEST_PASS=yourpassword
-./test_all.sh
-```
-
-## Updating
-
-```bash
-# Pull latest changes
-git pull
-
-# Rebuild containers
-docker compose build --no-cache
-
-# Restart with new images
-docker compose up -d
-```
-
-The database migration container runs automatically on startup and applies any pending schema changes.
-
-## Maintenance
-
-### View logs
-
-```bash
-docker compose logs -f leihs-legacy
-docker compose logs -f leihs-admin
-```
-
-### Database backup
-
-```bash
-docker compose exec leihs-db pg_dump -U leihs -d leihs > backup_$(date +%Y%m%d).sql
-```
-
-### Database shell
+After deploying with OIDC (`COMPOSE_FILE=docker-compose.yml:docker-compose.oidc.yml`), register the external authentication system in the database:
 
 ```bash
 docker compose exec leihs-db psql -U leihs -d leihs
 ```
 
-## Known Limitations
+```sql
+-- Insert OIDC external auth system (keys are auto-generated in keys/ directory)
+INSERT INTO authentication_systems (
+  id, name, description, type, enabled, priority,
+  internal_private_key, internal_public_key, external_public_key,
+  external_sign_in_url, send_email
+) VALUES (
+  'oidc', 'Sign in via Authentik', 'OIDC SSO via Authentik', 'external', true, 10,
+  '<contents of keys/leihs-private.pem>',
+  '<contents of keys/leihs-public.pem>',
+  '<contents of keys/oidc-bridge-public.pem>',
+  'https://<your-domain>/authenticators/oidc/login',
+  true
+);
 
-- The `leihs-inventory` service is not included (requires additional frontend build steps not yet implemented)
-- Build times are long due to Clojure uberjar compilation (~15-30 min on first build)
-- Requires at least 8 GB RAM — each JVM service needs ~512 MB
+-- Set external base URL (required for JWT claims)
+INSERT INTO system_and_security_settings (id, external_base_url)
+VALUES (0, 'https://<your-domain>')
+ON CONFLICT (id) DO UPDATE SET external_base_url = EXCLUDED.external_base_url;
+
+-- Enable OIDC for all users
+INSERT INTO authentication_systems_groups (authentication_system_id, group_id)
+VALUES ('oidc', '4dd87663-f731-5766-b97d-9494889ca66c') ON CONFLICT DO NOTHING;
+```
+
+Users are matched by email between Authentik and leihs.
+
+## OIDC Authentication Flow
+
+Since leihs uses a custom JWT-based external authentication system (not standard OIDC), a bridge service translates between protocols:
+
+```
+1. User clicks "Sign in via Authentik" on leihs login page
+2. leihs creates JWT token, redirects to oidc-bridge
+3. oidc-bridge verifies leihs JWT, stores state, redirects to Authentik
+4. User authenticates at Authentik (SSO)
+5. Authentik redirects back to oidc-bridge with authorization code
+6. oidc-bridge exchanges code for tokens, extracts user email
+7. oidc-bridge creates signed JWT with user identity
+8. oidc-bridge redirects back to leihs with signed JWT
+9. leihs verifies JWT signature and creates user session
+```
+
+## Updating
+
+```bash
+cd leihs-docker
+git pull
+docker compose build --no-cache
+docker compose up -d
+```
+
+The database migration container runs automatically on startup.
+
+## Troubleshooting
+
+**White screen / blank page:**
+The leihs Clojure backends (http-kit) do not set `Content-Type` headers for static JS/CSS files. The nginx config includes a fix that forces correct MIME types via `map` + `proxy_hide_header` + `add_header`. If you see a blank page, check that the nginx config is up to date and the `X-Content-Type-Options: nosniff` header is paired with correct Content-Types.
+
+**Seed data missing after migration:**
+If the `password` authentication system or `All Users` group are missing, check the db-migrate logs:
+```bash
+docker compose logs leihs-db-migrate | grep -i "seed\|password\|error"
+```
+The seed step requires `PGPASSWORD` to connect — this is set automatically via `DB_PASSWORD`.
+
+Check service logs:
+```bash
+docker compose logs -f leihs-legacy
+docker compose logs -f leihs-admin
+docker compose logs -f leihs-oidc-bridge
+docker compose logs -f leihs-db-migrate
+```
+
+Check database:
+```bash
+docker compose exec leihs-db psql -U leihs -d leihs
+```
 
 ## License
 
-This Docker packaging is provided under the [GPL-3.0 license](https://www.gnu.org/licenses/gpl-3.0.txt), the same license as leihs itself.
+This Docker packaging is provided under the same [GPL-3.0 license](https://www.gnu.org/licenses/gpl-3.0.txt) as leihs itself.
 
-leihs is developed and maintained by Zürcher Hochschule der Künste (Zurich University of the Arts).
+leihs is (C) Zürcher Hochschule der Künste (Zurich University of the Arts), Functional LLC, and contributors.

@@ -24,8 +24,10 @@ bundle exec rake db:migrate
 echo "=== Applying seed data ==="
 SEEDS_FILE="/build/leihs/database/db/seeds.sql"
 if [ -f "$SEEDS_FILE" ]; then
+  export PGPASSWORD="${DB_PASSWORD:-leihs}"
   psql -h "${DB_HOST:-leihs-db}" -p "${DB_PORT:-5432}" -U "${DB_USER:-leihs}" -d "${DB_NAME:-leihs}" \
     -f "$SEEDS_FILE" 2>&1 | grep -v "duplicate key" | grep -v "already exists" || true
+  unset PGPASSWORD
   echo "Seed data applied (duplicates ignored)."
 else
   echo "WARNING: seeds.sql not found at $SEEDS_FILE"
